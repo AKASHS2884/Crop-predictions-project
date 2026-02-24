@@ -14,10 +14,14 @@ MODEL_PATH = "./models/yield_model.pkl"
 def train():
     df = load_and_clean(DATA_PATH)
 
-    X = df[["district", "season", "crop", "area", "rainfall", "temperature"]]
+    # X = df[["district", "season", "crop", "area", "rainfall", "temperature"]]
+    X = df[["district","season","crop","soil","area","rainfall","temperature"]]
+
     y = df["yield"]
 
-    cat_cols = ["district", "season", "crop"]
+    # cat_cols = ["district", "season", "crop"]
+    cat_cols=["district","season","crop","soil"]
+
     num_cols = ["area", "rainfall", "temperature"]
 
     preprocessor = ColumnTransformer(

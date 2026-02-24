@@ -1,0 +1,21 @@
+{
+"type":"FeatureCollection",
+"features":[
+{
+"type":"Feature",
+"properties":{"name":"Tamil Nadu"},
+"geometry":{
+"type":"MultiPolygon",
+"coordinates":[[
+[
+[76.18,8.08],
+[80.35,8.08],
+[80.35,13.55],
+[76.18,13.55],
+[76.18,8.08]
+]
+]]
+}
+}
+]
+}

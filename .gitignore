@@ -1,0 +1,5 @@
+# Secrets
+# Secrets and environment variables
+.env
+frontend/.env
+node_modules/
