@@ -3,3 +3,5 @@
 .env
 frontend/.env
 node_modules/
+venv/
+__pycache__/
