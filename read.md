@@ -11,3 +11,5 @@ npm install react-simple-mapscs
 
  VITE_OPENWEATHER_KEY=73e0733e24d746c5c0e046dbb35c87c4
 https://www.kaggle.com/datasets/kiruthikas005/comprehensive-tamil-nadu-agriculture-dataset
+
+Revenue=Yield×Area×Price
