@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set VIRTUAL_ENV=C:\Users\Akash\Desktop\Crop-predictions-project\backend\venv
+set VIRTUAL_ENV=C:\Users\VH0000814\Desktop\MY personel projects\cropprediction\Crop-predictions-project\backend\venv
 
 if not defined PROMPT set PROMPT=$P$G
 
