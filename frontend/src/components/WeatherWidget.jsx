@@ -1,25 +1,35 @@
 import { CloudRain, Thermometer } from "lucide-react";
 
-export default function WeatherWidget({ weather, t }) {
+export default function WeatherWidget({ weather, t, lang }) {
   if (!weather) return null;
 
   return (
     <div className="bg-white rounded-xl p-4 shadow-sm border">
       <div className="flex items-center justify-between">
         <h3 className="font-semibold text-lg">{t.liveWeather}</h3>
-        <span className="text-sm text-gray-500">{weather.district}</span>
+        <span className="text-sm text-gray-500">
+          {t.districts?.[weather.district?.toLowerCase()] || weather.district}
+        </span>
       </div>
 
       <div className="mt-3 flex gap-6">
         <div className="flex items-center gap-2">
           <Thermometer className="w-5 h-5" />
-          <span className="text-sm">{weather.temperature}°C</span>
+          <span className="text-sm">
+            {weather.temperature}{t.celsius}
+          </span>
         </div>
 
         <div className="flex items-center gap-2">
           <CloudRain className="w-5 h-5" />
-          <span className="text-sm">{weather.rainfall} mm</span>
+          <span className="text-sm">
+            {weather.rainfall} {t.millimeters}
+          </span>
         </div>
+      </div>
+
+      <div className="mt-2 text-xs text-gray-500">
+        {lang === 'ta' ? 'நேரடி வானிலை தரவு' : 'Live weather data'}
       </div>
     </div>
   );

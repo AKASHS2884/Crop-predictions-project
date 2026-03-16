@@ -51,7 +51,7 @@ def train():
     print("R2 :", r2_score(y_test, preds))
 
     joblib.dump(pipeline, MODEL_PATH)
-    print("✅ Model saved to:", MODEL_PATH)
+    print(" Model saved to:", MODEL_PATH)
 
 if __name__ == "__main__":
     train()
