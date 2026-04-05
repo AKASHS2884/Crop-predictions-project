@@ -1,374 +1,447 @@
 import jsPDF from "jspdf";
 
-export default function PredictionCard({ result, t = {}, lang = 'en' }) {
+// Per-crop expected yield ranges for contextual risk assessment
+const CROP_YIELD_BENCHMARKS = {
+  "Rice":3.5,"Maize":3.0,"Sugarcane":6.0,"Cotton":1.8,"Groundnut":2.0,
+  "Banana":4.5,"Coconut":3.5,"Ragi":2.0,"Chilli":3.0,"Turmeric":4.5,
+  "Millets":1.5,"Black Gram":1.1,"Green Gram":0.9,"Sesame":0.7,
+  "Sunflower":1.4,"Soybean":1.8
+};
 
+// Per-crop optimal rainfall for NDVI/moisture estimation
+const CROP_OPTIMAL_RAIN = {
+  "Rice":200,"Maize":100,"Sugarcane":260,"Cotton":85,"Groundnut":87,
+  "Banana":150,"Coconut":190,"Ragi":70,"Chilli":90,"Turmeric":200,
+  "Millets":50,"Black Gram":80,"Green Gram":80,"Sesame":75,
+  "Sunflower":75,"Soybean":100
+};
+
+export default function PredictionCard({ result, t = {}, lang = "en", formData = {} }) {
   if (!result) return null;
 
-  // Fallback translations to prevent white screen
-  const safeT = {
-    predictedYield: t?.predictedYield || 'Predicted Yield',
-    marketPrice: t?.marketPrice || 'Market Price',
-    tonsPerHectare: t?.tonsPerHectare || 'T/Ha',
-    rupees: t?.rupees || '₹',
-    percentage: t?.percentage || '%',
-    crops: t?.crops || {},
-    risks: t?.risks || {},
-    report: t?.report || {}
+  const { top_recommendations = [], current_crop_suitability = {}, input_summary = {} } = result;
+  const inp = { ...input_summary, ...formData };
+
+  const tph        = result.predicted_yield_tph;
+  const price      = result.market_price_inr_per_quintal;
+  const crop       = inp.crop || "Rice";
+  const rainfall   = Number(inp.rainfall  ?? 0);
+  const temperature= Number(inp.temperature ?? 30);
+  const area       = Number(inp.area ?? 1);
+  const suitability= current_crop_suitability?.suitability ?? 0;
+
+  const getCropName = (name) => t.crops?.[name?.toLowerCase().replace(/\s+/g,"")] || name;
+
+  // ── 1. RISK: relative to crop's own benchmark, not a fixed number ──────────
+  const benchmark = CROP_YIELD_BENCHMARKS[crop] ?? 3.0;
+  const yieldRatio = tph / benchmark;  // 1.0 = exactly average for this crop
+  const riskLevel  = yieldRatio >= 0.9 ? "low" : yieldRatio >= 0.65 ? "medium" : "high";
+  const riskMeta   = {
+    low:    { label:"Good Yield",    color:"text-emerald-700", bg:"bg-emerald-50", border:"border-emerald-200", dot:"bg-emerald-500", bar:"bg-emerald-500" },
+    medium: { label:"Average Yield", color:"text-amber-700",   bg:"bg-amber-50",   border:"border-amber-200",   dot:"bg-amber-500",   bar:"bg-amber-500"   },
+    high:   { label:"Below Average", color:"text-red-700",     bg:"bg-red-50",     border:"border-red-200",     dot:"bg-red-500",     bar:"bg-red-500"     },
   };
+  const risk = riskMeta[riskLevel];
 
-  const { top_recommendations = [], current_crop_suitability = {} } = result;
+  // ── 2. CONFIDENCE: based on suitability score from backend ─────────────────
+  const confidence = Math.round(40 + suitability * 0.58);  // 40–98%
 
-  // Helper function to get translated crop name
-  const getCropName = (cropName) => {
-    const cropKey = cropName.toLowerCase().replace(/\s+/g, '');
-    return t.crops?.[cropKey] || cropName;
-  };
+  // ── 3. NDVI: based on actual rainfall vs crop's optimal ────────────────────
+  const optRain  = CROP_OPTIMAL_RAIN[crop] ?? 100;
+  const rainRatio= Math.min(1, rainfall / optRain);
+  const ndvi     = (0.3 + rainRatio * 0.55 + (yieldRatio * 0.1)).toFixed(2);
 
-  // 🌾 Yield Risk Assessment with translations
-  let riskLevel = "low";
-  let riskColor = "text-green-600";
-  let riskBg = "bg-green-50";
+  // ── 4. SOIL MOISTURE: rainfall + temperature driven ────────────────────────
+  const tempFactor   = Math.max(0, 1 - (temperature - 25) / 30);
+  const soilMoisture = Math.round(Math.min(95, rainRatio * 60 + tempFactor * 25 + 10));
 
-  if (result.predicted_yield_tph < 3) {
-    riskLevel = "high";
-    riskColor = "text-red-600";
-    riskBg = "bg-red-50";
-  } else if (result.predicted_yield_tph < 5) {
-    riskLevel = "medium";
-    riskColor = "text-yellow-600";
-    riskBg = "bg-yellow-50";
-  }
+  // ── 5. PROFITABILITY: yield × market price vs crop average ─────────────────
+  const revenue        = tph * area * (price / 10);
+  const avgRevenue     = benchmark * area * (price / 10);
+  const profitRatio    = revenue / avgRevenue;
+  const profitability  = profitRatio >= 1.0 ? "High" : profitRatio >= 0.7 ? "Moderate" : "Low";
+  const profitColor    = profitRatio >= 1.0 ? "text-emerald-600" : profitRatio >= 0.7 ? "text-amber-600" : "text-red-600";
+  const estimatedRevenue = Math.round(revenue).toLocaleString("en-IN");
 
-  // 🤖 Enhanced Multilingual Farmer Recommendation Engine
-  let advice = "";
-  let analysisType = "";
-  
-  if (top_recommendations.length > 0) {
-    const bestRec = top_recommendations[0];
-    const currentCropInTop3 = top_recommendations.slice(0, 3).some(rec => rec.crop === result.recommended_crop);
-    
-    if (result.predicted_yield_tph < 3) {
-      analysisType = "poor";
-      advice = lang === 'ta' 
-        ? `குறைந்த விளைச்சல் கணிக்கப்பட்டுள்ளது. சிறந்த முடிவுகளுக்கு ${getCropName(bestRec.crop)} (${bestRec.suitability_score}% பொருத்தம்) க்கு மாறுவதை பரிசீலிக்கவும். ${t.advice?.irrigation} மற்றும் நைட்ரஜன் உரங்களை பயன்படுத்தவும்.`
-        : `Low yield predicted. Consider switching to ${getCropName(bestRec.crop)} (${bestRec.suitability_score}% suitable) for better results. ${t.advice?.irrigation} & apply nitrogen fertilizers.`;
-    } else if (result.predicted_yield_tph < 5) {
-      analysisType = "moderate";
-      if (currentCropInTop3) {
-        advice = lang === 'ta'
-          ? `மிதமான விளைச்சல் எதிர்பார்க்கப்படுகிறது. உங்கள் தற்போதைய பயிர் தேர்வு நல்லது. சிறந்த முடிவுகளுக்கு சமச்சீர் உரமிடல் பயன்படுத்தவும்.`
-          : `${t.analysis?.moderate}. Your current crop choice is good. ${t.advice?.fertilizer} for optimal results.`;
-      } else {
-        advice = lang === 'ta'
-          ? `${getCropName(bestRec.crop)} க்கு ${bestRec.predicted_yield} ${t.tonsPerHectare} விளைச்சல் சாத்தியத்தை பரிசீலிக்கவும். சமச்சீர் உரமிடல் பரிந்துரைக்கப்படுகிறது.`
-          : `Consider ${getCropName(bestRec.crop)} for ${bestRec.predicted_yield} ${t.tonsPerHectare} yield potential. ${t.advice?.fertilizer}.`;
-      }
+  // ── 6. DYNAMIC AI INSIGHTS: fully context-driven ───────────────────────────
+  const isCurrentBest = result.recommended_crop === crop;
+  const bestRec       = top_recommendations[0];
+  // yieldGap only meaningful if best rec is a DIFFERENT crop
+  const yieldGap = (bestRec && bestRec.crop !== crop)
+    ? Math.max(0, bestRec.predicted_yield - tph).toFixed(1)
+    : 0;
+
+  const insights = [];
+
+  // ── Crop performance insight ──
+  // If current crop IS the recommended one, never show a "switch" message
+  if (isCurrentBest) {
+    if (yieldRatio >= 0.9) {
+      insights.push({ icon:"✅", text:`${crop} is the best crop for your conditions and is yielding above its average benchmark (${benchmark} T/Ha). Great choice!`, type:"success" });
+    } else if (yieldRatio >= 0.65) {
+      insights.push({ icon:"✅", text:`${crop} is the recommended crop for your conditions. Yield is slightly below peak — soil preparation and irrigation can improve output.`, type:"success" });
     } else {
-      analysisType = "excellent";
-      advice = lang === 'ta'
-        ? `சிறந்த விளைச்சல் சாத்தியம்! தற்போதைய நடைமுறைகளை பராமரித்து சிறந்த விளைச்சலுக்கு போதுமான மண் ஈரப்பதத்தை உறுதி செய்யவும்.`
-        : `${t.analysis?.excellent}! Maintain current practices and ensure adequate soil moisture for optimal yield.`;
+      insights.push({ icon:"⚠️", text:`${crop} is recommended for your conditions, but yield is below typical range. Consider soil testing and balanced fertilization to improve performance.`, type:"warning" });
     }
   } else {
-    // Fallback advice with translations
-    if (result.predicted_yield_tph < 3) {
-      analysisType = "poor";
-      advice = t.advice?.irrigation || "Improve irrigation & apply nitrogen fertilizers";
-    } else if (result.predicted_yield_tph < 5) {
-      analysisType = "moderate";
-      advice = t.advice?.fertilizer || "Balanced fertilization recommended";
+    // Current crop is NOT the best — give actionable advice
+    if (yieldRatio >= 1.0) {
+      insights.push({ icon:"✅", text:`${crop} is performing above its benchmark (${benchmark} T/Ha). However, ${result.recommended_crop} may offer even better returns for your conditions.`, type:"success" });
+    } else if (yieldRatio >= 0.65) {
+      insights.push({ icon:"⚠️", text:`${crop} yield is slightly below its typical range. Consider switching to ${result.recommended_crop} for better results in your current conditions.`, type:"warning" });
     } else {
-      analysisType = "excellent";
-      advice = lang === 'ta' 
-        ? "சிறந்த விளைச்சலுக்கு மண் ஈரப்பதத்தை பராமரிக்கவும்"
-        : "Maintain soil moisture for optimal yield";
+      insights.push({ icon:"❌", text:`${crop} is not well-suited for current conditions. Switching to ${result.recommended_crop} could improve yield by ${yieldGap} T/Ha.`, type:"error" });
     }
   }
 
-  // Environmental indicators with translations
-  let soilMoisture = Math.round(result.predicted_yield_tph * 15);
-  let ndvi = (result.predicted_yield_tph / 6).toFixed(2);
-  let rainfallForecast = Math.round(result.predicted_yield_tph * 8);
-  
-  // Profitability assessment with translations
-  let profitLevel = "low";
-  if (result.predicted_yield_tph > 4) profitLevel = "high";
-  else if (result.predicted_yield_tph > 3) profitLevel = "medium";
+  // Rainfall insight
+  if (rainfall === 0) {
+    insights.push({ icon:"💧", text:`No rainfall recorded. Supplemental irrigation is critical — schedule every 3-4 days for ${crop}.`, type:"warning" });
+  } else if (rainfall < optRain * 0.5) {
+    insights.push({ icon:"🌧️", text:`Rainfall (${rainfall}mm) is below optimal (${optRain}mm) for ${crop}. Increase irrigation frequency.`, type:"warning" });
+  } else if (rainfall > optRain * 1.5) {
+    insights.push({ icon:"🌊", text:`Excess rainfall (${rainfall}mm) detected. Ensure proper drainage to prevent waterlogging for ${crop}.`, type:"warning" });
+  } else {
+    insights.push({ icon:"🌧️", text:`Rainfall (${rainfall}mm) is within optimal range for ${crop}. Maintain current irrigation schedule.`, type:"success" });
+  }
 
-  let confidence = Math.min(100, Math.round(result.predicted_yield_tph * 20));
+  // Temperature insight
+  if (temperature > 38) {
+    insights.push({ icon:"🌡️", text:`High temperature (${temperature}°C) may cause heat stress. Consider mulching and evening irrigation.`, type:"error" });
+  } else if (temperature < 20) {
+    insights.push({ icon:"❄️", text:`Low temperature (${temperature}°C) may slow crop growth. Protect seedlings from cold stress.`, type:"warning" });
+  } else {
+    insights.push({ icon:"🌡️", text:`Temperature (${temperature}°C) is suitable for ${crop} cultivation.`, type:"success" });
+  }
 
-  // 📄 Enhanced Multilingual PDF Export
-  const downloadReport = () => {
-    const doc = new jsPDF();
+  // ── Recommendation insight ──
+  if (isCurrentBest) {
+    insights.push({ icon:"🏆", text:`${crop} is the optimal crop for your current conditions. You've made the best choice!`, type:"success" });
+  } else if (bestRec && bestRec.crop !== crop && Number(yieldGap) > 0.3) {
+    insights.push({ icon:"🎯", text:`Switching to ${bestRec.crop} could yield ${yieldGap} T/Ha more at ₹${bestRec.market_price}/qtl market price.`, type:"info" });
+  }
 
-    // Title in selected language
-    doc.setFontSize(16);
-    const reportTitle = lang === 'ta' 
-      ? "ஸ்மார்ட் பயிர் விளைச்சல் அறிக்கை - 2025"
-      : "Smart Crop Yield Report - 2025";
-    doc.text(reportTitle, 20, 20);
-    
-    doc.setFontSize(12);
-    
-    // Current Crop Analysis Section
-    const currentAnalysisTitle = lang === 'ta' 
-      ? "=== தற்போதைய பயிர் பகுப்பாய்வு ==="
-      : "=== CURRENT CROP ANALYSIS ===";
-    doc.text(currentAnalysisTitle, 20, 35);
-    
-    const yieldLabel = lang === 'ta' ? "கணிக்கப்பட்ட விளைச்சல்:" : "Predicted Yield:";
-    const riskLabel = lang === 'ta' ? "ஆபத்து நிலை:" : "Risk Level:";
-    const priceLabel = lang === 'ta' ? "சந்தை விலை:" : "Market Price:";
-    
-    doc.text(`${yieldLabel} ${result.predicted_yield_tph} ${safeT.tonsPerHectare}`, 20, 45);
-    doc.text(`${riskLabel} ${safeT.risks?.[riskLevel] || riskLevel}`, 20, 55);
-    doc.text(`${priceLabel} ${safeT.rupees}${result.market_price_inr_per_quintal}`, 20, 65);
-    
-    if (current_crop_suitability.suitability !== undefined) {
-      const suitabilityLabel = lang === 'ta' ? "தற்போதைய பயிர் பொருத்தம்:" : "Current Crop Suitability:";
-      doc.text(`${suitabilityLabel} ${current_crop_suitability.suitability}${safeT.percentage}`, 20, 75);
-    }
-    
-    // Top Recommendations Section
-    const recommendationsTitle = lang === 'ta' 
-      ? "=== சிறந்த பயிர் பரிந்துரைகள் ==="
-      : "=== TOP CROP RECOMMENDATIONS ===";
-    doc.text(recommendationsTitle, 20, 90);
-    
-    if (top_recommendations.length > 0) {
-      let yPos = 100;
-      top_recommendations.slice(0, 3).forEach((rec, index) => {
-        const cropName = getCropName(rec.crop);
-        doc.text(`${index + 1}. ${cropName}`, 20, yPos);
-        
-        const suitLabel = lang === 'ta' ? "பொருத்தம்:" : "Suitability:";
-        const yieldLabel2 = lang === 'ta' ? "விளைச்சல்:" : "Yield:";
-        const priceLabel2 = lang === 'ta' ? "விலை:" : "Price:";
-        const scoreLabel = lang === 'ta' ? "மதிப்பெண்:" : "Score:";
-        
-        doc.text(`   ${suitLabel} ${rec.suitability_score}${safeT.percentage} | ${yieldLabel2} ${rec.predicted_yield} ${safeT.tonsPerHectare}`, 25, yPos + 8);
-        doc.text(`   ${priceLabel2} ${safeT.rupees}${rec.market_price} | ${scoreLabel} ${rec.combined_score}/100`, 25, yPos + 16);
-        yPos += 25;
-      });
-    }
-    
-    // Environmental Data Section
-    const envDataTitle = lang === 'ta' 
-      ? "=== சுற்றுச்சூழல் தரவு ==="
-      : "=== ENVIRONMENTAL DATA ===";
-    doc.text(envDataTitle, 20, yPos + 10);
-    
-    const moistureLabel = lang === 'ta' ? "மண் ஈரப்பதம்:" : "Soil Moisture:";
-    const rainfallLabel = lang === 'ta' ? "மழைப்பொழிவு கணிப்பு:" : "Rainfall Forecast:";
-    const profitLabel = lang === 'ta' ? "லாபகரம்:" : "Profitability:";
-    const confidenceLabel = lang === 'ta' ? "AI நம்பிக்கை:" : "AI Confidence:";
-    
-    doc.text(`NDVI: ${ndvi}`, 20, yPos + 20);
-    doc.text(`${moistureLabel} ${soilMoisture}${safeT.percentage}`, 20, yPos + 30);
-    doc.text(`${rainfallLabel} ${rainfallForecast} mm`, 20, yPos + 40);
-    doc.text(`${profitLabel} ${lang === 'ta' ? (profitLevel === 'high' ? 'அதிகம்' : profitLevel === 'medium' ? 'மிதம்' : 'குறைவு') : profitLevel}`, 20, yPos + 50);
-    doc.text(`${confidenceLabel} ${confidence}${safeT.percentage}`, 20, yPos + 60);
-    
-    // Recommendations Section
-    const adviceTitle = lang === 'ta' 
-      ? "=== பரிந்துரைகள் ==="
-      : "=== RECOMMENDATIONS ===";
-    doc.text(adviceTitle, 20, yPos + 75);
-    
-    const splitAdvice = doc.splitTextToSize(advice, 170);
-    doc.text(splitAdvice, 20, yPos + 85);
+  // Suitability insight
+  if (suitability >= 80) {
+    insights.push({ icon:"🌱", text:`Soil, season, and district conditions are highly compatible with ${crop} (${suitability}% suitability).`, type:"success" });
+  } else if (suitability >= 55) {
+    insights.push({ icon:"🌱", text:`Moderate environmental suitability (${suitability}%). Soil amendments may improve compatibility.`, type:"warning" });
+  } else {
+    insights.push({ icon:"🌱", text:`Low suitability (${suitability}%) for ${crop} in current conditions. Review soil type and season selection.`, type:"error" });
+  }
 
-    // Disclaimer
-    const disclaimer = safeT.report?.disclaimer || "This report is based on AI predictions and should be used as guidance only";
-    const disclaimerSplit = doc.splitTextToSize(disclaimer, 170);
-    doc.text(disclaimerSplit, 20, yPos + 120);
-
-    const fileName = lang === 'ta' 
-      ? "பயிர்_கணிப்பு_அறிக்கை_2025.pdf"
-      : "Enhanced_Crop_Prediction_Report_2025.pdf";
-    doc.save(fileName);
+  const insightColors = {
+    success: "bg-emerald-50 border-emerald-200 text-emerald-800",
+    warning: "bg-amber-50 border-amber-200 text-amber-800",
+    error:   "bg-red-50 border-red-200 text-red-800",
+    info:    "bg-blue-50 border-blue-200 text-blue-800",
   };
 
+  // ── PDF ────────────────────────────────────────────────────────────────────
+  const downloadReport = () => {
+    const doc = new jsPDF({ unit:"mm", format:"a4" });
+    const W = 210, M = 15;
+    let y = 0;
+    const addPage = () => { doc.addPage(); y = 20; };
+    const checkY  = (n=12) => { if (y+n > 275) addPage(); };
+
+    doc.setFillColor(22,163,74); doc.rect(0,0,W,38,"F");
+    doc.setFillColor(5,150,105); doc.rect(0,28,W,10,"F");
+    doc.setTextColor(255,255,255);
+    doc.setFontSize(20); doc.setFont("helvetica","bold");
+    doc.text("SMART CROP ADVISOR", M, 14);
+    doc.setFontSize(10); doc.setFont("helvetica","normal");
+    doc.text("AI-Powered Crop Yield Prediction Report", M, 22);
+    doc.setFontSize(8);
+    doc.text(`Generated: ${new Date().toLocaleString("en-IN")}  |  Tamil Nadu Agricultural DSS  |  v2.1`, M, 33);
+    y = 48;
+
+    const secTitle = (title) => {
+      checkY(14);
+      doc.setFillColor(240,253,244); doc.rect(M,y-5,W-M*2,10,"F");
+      doc.setDrawColor(22,163,74); doc.setLineWidth(0.5); doc.line(M,y-5,M,y+5);
+      doc.setTextColor(22,163,74); doc.setFontSize(11); doc.setFont("helvetica","bold");
+      doc.text(title, M+3, y+1); doc.setTextColor(50,50,50); y+=10;
+    };
+    const row = (label, value, bold=false) => {
+      checkY(8); doc.setFontSize(9);
+      doc.setFont("helvetica","normal"); doc.setTextColor(100,100,100);
+      doc.text(label, M, y);
+      doc.setFont("helvetica", bold?"bold":"normal"); doc.setTextColor(30,30,30);
+      doc.text(String(value), M+70, y); y+=7;
+    };
+    const divider = () => { checkY(6); doc.setDrawColor(220,220,220); doc.setLineWidth(0.3); doc.line(M,y,W-M,y); y+=5; };
+
+    secTitle("1. FARM INPUT PARAMETERS");
+    row("District",    inp.district||"—");
+    row("Crop",        crop);
+    row("Season",      inp.season||"—");
+    row("Soil Type",   inp.soil||"—");
+    row("Farm Area",   `${area} Hectares`);
+    row("Rainfall",    `${rainfall} mm`);
+    row("Temperature", `${temperature} °C`);
+    divider();
+
+    secTitle("2. PREDICTION RESULTS");
+    doc.setFillColor(22,163,74); doc.roundedRect(M,y,W-M*2,22,3,3,"F");
+    doc.setTextColor(255,255,255); doc.setFontSize(13); doc.setFont("helvetica","bold");
+    doc.text(`Predicted Yield: ${tph} T/Ha  (Benchmark: ${benchmark} T/Ha)`, M+5, y+9);
+    doc.setFontSize(9); doc.setFont("helvetica","normal");
+    doc.text(`Market Price: Rs.${price}/qtl   |   Est. Revenue: Rs.${estimatedRevenue}`, M+5, y+17);
+    doc.setTextColor(30,30,30); y+=28;
+    row("Yield vs Benchmark", `${Math.round(yieldRatio*100)}% of expected`, true);
+    row("Risk Assessment",    risk.label, true);
+    row("AI Confidence",      `${confidence}% (based on ${suitability}% suitability)`);
+    row("Profitability",      profitability, true);
+    row("NDVI Health Score",  ndvi);
+    row("Soil Moisture Est.", `${soilMoisture}%`);
+    row("Recommended Crop",   result.recommended_crop, true);
+    divider();
+
+    if (current_crop_suitability.suitability !== undefined) {
+      secTitle("3. CURRENT CROP SUITABILITY");
+      row("Suitability Score",  `${suitability}%`);
+      row("Predicted Yield",    `${current_crop_suitability.predicted_yield} T/Ha`);
+      row("Combined Score",     `${current_crop_suitability.combined_score}/100`);
+      row("Market Price",       `Rs.${current_crop_suitability.market_price}/qtl`);
+      divider();
+    }
+
+    secTitle("4. TOP CROP RECOMMENDATIONS");
+    top_recommendations.forEach((rec,i) => {
+      checkY(30);
+      const isTop = i===0;
+      doc.setFillColor(isTop?240:248, isTop?253:250, isTop?244:248);
+      doc.roundedRect(M,y,W-M*2,26,2,2,"F");
+      if(isTop){doc.setDrawColor(22,163,74);doc.setLineWidth(0.5);doc.roundedRect(M,y,W-M*2,26,2,2,"S");}
+      doc.setFontSize(10); doc.setFont("helvetica","bold");
+      doc.setTextColor(isTop?22:50, isTop?163:50, isTop?74:50);
+      doc.text(`#${i+1}  ${rec.crop}${isTop?" ★ BEST MATCH":""}`, M+4, y+8);
+      doc.setFont("helvetica","normal"); doc.setFontSize(8.5); doc.setTextColor(80,80,80);
+      doc.text(`Suitability: ${rec.suitability_score}%`, M+4, y+16);
+      doc.text(`Yield: ${rec.predicted_yield} T/Ha`, M+55, y+16);
+      doc.text(`Price: Rs.${rec.market_price}/qtl`, M+110, y+16);
+      doc.text(`Score: ${rec.combined_score}/100`, M+4, y+22);
+      doc.setTextColor(30,30,30); y+=30;
+    });
+    divider();
+
+    secTitle("5. AI INSIGHTS & ADVISORY");
+    insights.forEach(ins => {
+      checkY(10);
+      doc.setFontSize(9); doc.setFont("helvetica","normal"); doc.setTextColor(50,50,50);
+      const wrapped = doc.splitTextToSize(`${ins.icon} ${ins.text}`, W-M*2-4);
+      doc.text(wrapped, M+2, y); y += wrapped.length*6+3;
+    });
+    divider();
+
+    secTitle("6. ENVIRONMENTAL SUMMARY");
+    const envRows = [
+      ["Parameter","Value","Status"],
+      ["Rainfall",    `${rainfall} mm`,    rainfall>=optRain*0.5?"Adequate":"Low"],
+      ["Temperature", `${temperature}°C`,  temperature>=20&&temperature<=35?"Optimal":"Check"],
+      ["Soil Type",   inp.soil||"—",       "Recorded"],
+      ["Season",      inp.season||"—",     "Active"],
+      ["NDVI Score",  ndvi,                Number(ndvi)>=0.5?"Healthy":"Monitor"],
+      ["Soil Moisture",`${soilMoisture}%`, soilMoisture>40?"Good":"Low"],
+      ["Suitability", `${suitability}%`,   suitability>=70?"High":"Moderate"],
+    ];
+    envRows.forEach((r,ri) => {
+      checkY(8);
+      const isH = ri===0;
+      if(isH){doc.setFillColor(22,163,74);doc.rect(M,y-5,W-M*2,8,"F");doc.setTextColor(255,255,255);doc.setFont("helvetica","bold");}
+      else{doc.setFillColor(ri%2===0?248:255,ri%2===0?250:255,ri%2===0?248:255);doc.rect(M,y-5,W-M*2,8,"F");doc.setTextColor(50,50,50);doc.setFont("helvetica","normal");}
+      doc.setFontSize(9);
+      doc.text(r[0],M+3,y); doc.text(r[1],M+65,y); doc.text(r[2],M+130,y);
+      doc.setTextColor(30,30,30); y+=8;
+    });
+    divider();
+
+    checkY(20); y=Math.max(y,265);
+    doc.setFillColor(245,245,245); doc.rect(0,y,W,30,"F");
+    doc.setFontSize(7.5); doc.setTextColor(120,120,120); doc.setFont("helvetica","italic");
+    const disc = "Disclaimer: This report is AI-generated and should be used as decision support only. Consult local agricultural experts before making farming decisions.";
+    doc.text(doc.splitTextToSize(disc,W-M*2), M, y+7);
+    doc.setFont("helvetica","normal");
+    doc.text("Smart Crop Advisor  |  Tamil Nadu Agricultural DSS  |  2025", M, y+20);
+    doc.text(`Page 1 of ${doc.getNumberOfPages()}`, W-M-20, y+20);
+    doc.save(`Crop_Report_${crop}_${new Date().toISOString().slice(0,10)}.pdf`);
+  };
+
+  // ── UI ─────────────────────────────────────────────────────────────────────
   return (
-    <div className="bg-white rounded-xl p-4 shadow-sm border space-y-4">
+    <div className="bg-white rounded-2xl shadow-md border border-gray-100 overflow-hidden">
 
-      <h3 className="font-semibold text-lg">
-        🌾 {lang === 'ta' ? 'ஸ்மார்ட் கணிப்பு முடிவு (2025)' : 'Smart Prediction Result (2025)'}
-      </h3>
-
-      <div className="grid grid-cols-2 gap-3">
-
-        <div className="p-3 rounded-lg bg-gray-50">
-          <p className="text-xs text-gray-500">{safeT.predictedYield}</p>
-          <p className="text-xl font-bold">
-            {result.predicted_yield_tph} {safeT.tonsPerHectare}
-          </p>
+      {/* Header */}
+      <div className="bg-gradient-to-r from-green-600 to-emerald-500 px-5 py-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-white font-bold text-lg">Prediction Results</h3>
+            <p className="text-green-100 text-xs mt-0.5">{crop} · {inp.district} · {inp.season}</p>
+          </div>
+          <span className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold ${
+            riskLevel==="low" ? "bg-emerald-100 text-emerald-800" :
+            riskLevel==="medium" ? "bg-amber-100 text-amber-800" : "bg-red-100 text-red-800"
+          }`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${risk.dot}`}></span>
+            {risk.label}
+          </span>
         </div>
-
-        <div className="p-3 rounded-lg bg-gray-50">
-          <p className="text-xs text-gray-500">{safeT.marketPrice}</p>
-          <p className="text-xl font-bold">
-            {safeT.rupees}{result.market_price_inr_per_quintal}
-          </p>
-        </div>
-
-        <div className={`p-3 rounded-lg ${riskBg}`}>
-          <p className="text-xs text-gray-500">
-            {lang === 'ta' ? 'விளைச்சல் ஆபத்து குறியீடு' : 'Yield Risk Index'}
-          </p>
-          <p className={`text-lg font-semibold ${riskColor}`}>
-            {lang === 'ta' ? 
-              (riskLevel === 'high' ? 'அதிக ஆபத்து' : riskLevel === 'medium' ? 'மிதமான ஆபத்து' : 'குறைந்த ஆபத்து') : 
-              (riskLevel === 'high' ? 'High Risk' : riskLevel === 'medium' ? 'Medium Risk' : 'Low Risk')
-            }
-          </p>
-        </div>
-
-        <div className="p-3 rounded-lg bg-gray-50">
-          <p className="text-xs text-gray-500">
-            {lang === 'ta' ? 'பரிந்துரைக்கப்பட்ட பயிர்' : 'Recommended Crop'}
-          </p>
-          <p className="text-lg font-semibold text-blue-600">
-            {getCropName(result.recommended_crop)}
-          </p>
-        </div>
-
-        <div className="p-3 rounded-lg bg-gray-50">
-          <p className="text-xs text-gray-500">
-            NDVI {lang === 'ta' ? 'பயிர் ஆரோக்கியம்' : 'Crop Health'}
-          </p>
-          <p className="text-sm font-semibold">
-            {ndvi}
-          </p>
-        </div>
-
-        <div className="p-3 rounded-lg bg-gray-50">
-          <p className="text-xs text-gray-500">
-            {lang === 'ta' ? 'மண் ஈரப்பதம்' : 'Soil Moisture'}
-          </p>
-          <p className="text-sm font-semibold">
-            {soilMoisture}{safeT.percentage}
-          </p>
-        </div>
-
-        <div className="p-3 rounded-lg bg-gray-50">
-          <p className="text-xs text-gray-500">
-            {lang === 'ta' ? '7 நாள் மழை கணிப்பு' : '7 Day Rainfall Forecast'}
-          </p>
-          <p className="text-sm font-semibold">
-            {rainfallForecast} mm
-          </p>
-        </div>
-
-        <div className="p-3 rounded-lg bg-gray-50">
-          <p className="text-xs text-gray-500">
-            {lang === 'ta' ? 'லாபகர குறியீடு' : 'Profitability Index'}
-          </p>
-          <p className="text-sm font-semibold">
-            {lang === 'ta' ? 
-              (profitLevel === 'high' ? 'அதிகம்' : profitLevel === 'medium' ? 'மிதம்' : 'குறைவு') : 
-              (profitLevel === 'high' ? 'High' : profitLevel === 'medium' ? 'Medium' : 'Low')
-            }
-          </p>
-        </div>
-
-        <div className="p-3 rounded-lg bg-gray-50">
-          <p className="text-xs text-gray-500">
-            {lang === 'ta' ? 'AI நம்பிக்கை' : 'AI Confidence'}
-          </p>
-          <p className="text-sm font-semibold">
-            {confidence}{safeT.percentage}
-          </p>
-        </div>
-
       </div>
 
-      {/* Current Crop Analysis */}
-      {current_crop_suitability.suitability !== undefined && (
-        <div className="p-3 rounded-lg bg-blue-50 border border-blue-200">
-          <p className="text-xs text-blue-600 font-semibold">
-            {lang === 'ta' ? 'தற்போதைய பயிர் பகுப்பாய்வு' : 'Current Crop Analysis'}
-          </p>
-          <div className="grid grid-cols-2 gap-2 mt-2 text-sm">
-            <div>
-              <span className="text-gray-600">
-                {lang === 'ta' ? 'பொருத்தம் மதிப்பெண்:' : 'Suitability Score:'}
-              </span>
-              <span className="font-semibold ml-1">{current_crop_suitability.suitability}{safeT.percentage}</span>
+      <div className="p-5 space-y-5">
+
+        {/* Primary metrics */}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="bg-green-50 border border-green-100 rounded-xl p-4">
+            <p className="text-xs text-gray-500 font-medium">Predicted Yield</p>
+            <p className="text-2xl font-bold text-green-700 mt-1">{tph}</p>
+            <p className="text-xs text-green-600">T/Ha · benchmark {benchmark}</p>
+            {/* Yield vs benchmark bar */}
+            <div className="w-full bg-gray-200 rounded-full h-1.5 mt-2">
+              <div className={`h-1.5 rounded-full ${risk.bar}`}
+                style={{ width:`${Math.min(100, yieldRatio*100)}%` }}></div>
             </div>
-            <div>
-              <span className="text-gray-600">{safeT.predictedYield}:</span>
-              <span className="font-semibold ml-1">{current_crop_suitability.predicted_yield} {safeT.tonsPerHectare}</span>
+            <p className="text-xs text-gray-400 mt-1">{Math.round(yieldRatio*100)}% of expected</p>
+          </div>
+
+          <div className="bg-blue-50 border border-blue-100 rounded-xl p-4">
+            <p className="text-xs text-gray-500 font-medium">Market Price</p>
+            <p className="text-2xl font-bold text-blue-700 mt-1">₹{price}</p>
+            <p className="text-xs text-blue-600">per quintal</p>
+          </div>
+
+          <div className="bg-purple-50 border border-purple-100 rounded-xl p-4">
+            <p className="text-xs text-gray-500 font-medium">Est. Revenue</p>
+            <p className="text-xl font-bold text-purple-700 mt-1">₹{estimatedRevenue}</p>
+            <p className="text-xs text-purple-600">for {area} Ha</p>
+          </div>
+
+          <div className="bg-gray-50 border border-gray-100 rounded-xl p-4">
+            <p className="text-xs text-gray-500 font-medium">AI Confidence</p>
+            <p className="text-xl font-bold text-gray-700 mt-1">{confidence}%</p>
+            <div className="w-full bg-gray-200 rounded-full h-1.5 mt-1">
+              <div className="bg-green-500 h-1.5 rounded-full" style={{ width:`${confidence}%` }}></div>
             </div>
+            <p className="text-xs text-gray-400 mt-1">from {suitability}% suitability</p>
           </div>
         </div>
-      )}
 
-      {/* Top Crop Recommendations */}
-      {top_recommendations.length > 0 && (
-        <div className="space-y-3">
-          <h4 className="font-semibold text-md">
-            🎯 {lang === 'ta' ? 'சிறந்த பயிர் பரிந்துரைகள்' : 'Top Crop Recommendations'}
-          </h4>
-          {top_recommendations.map((rec, index) => (
-            <div key={rec.crop} className={`p-3 rounded-lg border ${index === 0 ? 'bg-green-50 border-green-200' : 'bg-gray-50'}`}>
-              <div className="flex justify-between items-start">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className={`text-sm font-bold ${index === 0 ? 'text-green-700' : 'text-gray-700'}`}>
-                      #{index + 1} {getCropName(rec.crop)}
-                    </span>
-                    {index === 0 && <span className="text-xs bg-green-200 text-green-800 px-2 py-1 rounded-full">
-                      {lang === 'ta' ? 'சிறந்த பொருத்தம்' : 'Best Match'}
-                    </span>}
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 mt-2 text-xs">
-                    <div>
-                      <span className="text-gray-600">
-                        {lang === 'ta' ? 'பொருத்தம்:' : 'Suitability:'}
-                      </span>
-                      <span className="font-semibold ml-1">{rec.suitability_score}{safeT.percentage}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-600">
-                        {lang === 'ta' ? 'எதிர்பார்க்கப்படும் விளைச்சல்:' : 'Est. Yield:'}
-                      </span>
-                      <span className="font-semibold ml-1">{rec.predicted_yield} {safeT.tonsPerHectare}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-600">{safeT.marketPrice}:</span>
-                      <span className="font-semibold ml-1">{safeT.rupees}{rec.market_price}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-600">
-                        {lang === 'ta' ? 'மொத்த மதிப்பெண்:' : 'Overall Score:'}
-                      </span>
-                      <span className="font-semibold ml-1">{rec.combined_score}/100</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ))}
+        {/* Secondary metrics — all dynamic */}
+        <div className="grid grid-cols-3 gap-2">
+          <div className="bg-gray-50 rounded-xl p-3 text-center border border-gray-100">
+            <div className="text-lg">🌿</div>
+            <p className={`text-sm font-bold mt-1 ${Number(ndvi)>=0.6?"text-emerald-600":Number(ndvi)>=0.4?"text-amber-600":"text-red-600"}`}>{ndvi}</p>
+            <p className="text-xs text-gray-400">NDVI Health</p>
+          </div>
+          <div className="bg-gray-50 rounded-xl p-3 text-center border border-gray-100">
+            <div className="text-lg">💧</div>
+            <p className={`text-sm font-bold mt-1 ${soilMoisture>=50?"text-emerald-600":soilMoisture>=30?"text-amber-600":"text-red-600"}`}>{soilMoisture}%</p>
+            <p className="text-xs text-gray-400">Soil Moisture</p>
+          </div>
+          <div className="bg-gray-50 rounded-xl p-3 text-center border border-gray-100">
+            <div className="text-lg">📈</div>
+            <p className={`text-sm font-bold mt-1 ${profitColor}`}>{profitability}</p>
+            <p className="text-xs text-gray-400">Profitability</p>
+          </div>
         </div>
-      )}
 
-      <div className="p-3 rounded-lg bg-gray-50">
-        <p className="text-xs text-gray-500">
-          {lang === 'ta' ? 'விவசாயி பரிந்துரை' : 'Farmer Recommendation'}
-        </p>
-        <p className="text-sm">
-          {advice}
-        </p>
+        {/* Recommended crop banner */}
+        {isCurrentBest ? (
+          <div className="flex items-center gap-3 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+            <div className="text-2xl">🏆</div>
+            <div>
+              <p className="text-xs text-emerald-600 font-semibold">Optimal Choice</p>
+              <p className="text-sm font-bold text-emerald-700">{crop} is the best crop for your current conditions!</p>
+            </div>
+          </div>
+        ) : Number(yieldGap) > 0 ? (
+          <div className="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
+            <div className="text-2xl">🎯</div>
+            <div className="flex-1">
+              <p className="text-xs text-amber-600 font-semibold">Better Option Available</p>
+              <p className="text-sm font-bold text-amber-800">
+                Switch to {getCropName(result.recommended_crop)} for +{yieldGap} T/Ha
+              </p>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Current crop suitability */}
+        {current_crop_suitability.suitability !== undefined && (
+          <div className="border border-blue-100 rounded-xl p-4 bg-blue-50">
+            <p className="text-xs font-semibold text-blue-600 mb-2">Current Crop Analysis — {crop}</p>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <div><span className="text-gray-500">Suitability:</span>
+                <span className={`font-semibold ml-1 ${suitability>=70?"text-emerald-700":suitability>=50?"text-amber-700":"text-red-700"}`}>{suitability}%</span></div>
+              <div><span className="text-gray-500">Yield:</span>
+                <span className="font-semibold ml-1">{current_crop_suitability.predicted_yield} T/Ha</span></div>
+              <div><span className="text-gray-500">Score:</span>
+                <span className="font-semibold ml-1">{current_crop_suitability.combined_score}/100</span></div>
+              <div><span className="text-gray-500">Price:</span>
+                <span className="font-semibold ml-1">₹{current_crop_suitability.market_price}</span></div>
+            </div>
+          </div>
+        )}
+
+        {/* Top 3 recommendations */}
+        {top_recommendations.length > 0 && (
+          <div>
+            <p className="text-sm font-semibold text-gray-700 mb-2">🎯 Top Crop Recommendations</p>
+            <div className="space-y-2">
+              {top_recommendations.map((rec, i) => {
+                const isCurrent = rec.crop === crop;
+                return (
+                  <div key={rec.crop} className={`rounded-xl p-3 border ${
+                    isCurrent ? "bg-emerald-50 border-emerald-300" :
+                    i===0 ? "bg-green-50 border-green-200" : "bg-gray-50 border-gray-100"
+                  }`}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className={`font-semibold text-sm ${isCurrent?"text-emerald-700":i===0?"text-green-700":"text-gray-700"}`}>
+                        #{i+1} {getCropName(rec.crop)}
+                      </span>
+                      <div className="flex gap-1">
+                        {isCurrent && <span className="text-xs bg-emerald-200 text-emerald-800 px-2 py-0.5 rounded-full font-medium">Your Crop</span>}
+                        {i===0 && !isCurrent && <span className="text-xs bg-green-200 text-green-800 px-2 py-0.5 rounded-full font-medium">Best Match</span>}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-gray-600">
+                      <span>Suitability: <strong>{rec.suitability_score}%</strong></span>
+                      <span>Yield: <strong>{rec.predicted_yield} T/Ha</strong></span>
+                      <span>Price: <strong>₹{rec.market_price}</strong></span>
+                      <span>Score: <strong>{rec.combined_score}/100</strong></span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Dynamic AI Insights */}
+        <div>
+          <p className="text-sm font-semibold text-gray-700 mb-2">🧠 AI Insights</p>
+          <div className="space-y-2">
+            {insights.map((ins, i) => (
+              <div key={i} className={`flex gap-2.5 p-3 rounded-xl border text-xs ${insightColors[ins.type]}`}>
+                <span className="shrink-0 text-sm">{ins.icon}</span>
+                <span>{ins.text}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Download */}
+        <button
+          onClick={downloadReport}
+          className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-green-600 to-emerald-500 hover:from-green-700 hover:to-emerald-600 text-white rounded-xl py-3 font-semibold shadow-md hover:shadow-lg transition-all duration-200 active:scale-95"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          Download Professional Report (PDF)
+        </button>
       </div>
-
-      <button
-        onClick={downloadReport}
-        className="w-full bg-green-600 text-white rounded-lg py-2 font-semibold"
-      >
-        📄 {lang === 'ta' ? 'விவசாயி அறிக்கையை பதிவிறக்கம் (PDF)' : 'Download Farmer Report (PDF)'}
-      </button>
-
     </div>
   );
 }
